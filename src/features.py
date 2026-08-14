@@ -14,6 +14,10 @@ import pandas as pd
 OBSERVATION_MONTHS = 6  # окно наблюдения: сколько месяцев до snapshot
 FORECAST_MONTHS = 3      # окно прогноза: сколько месяцев после snapshot
 
+def shift_month(month: str, delta: int) -> str:
+    """Сдвинуть месяц 'YYYY-MM' на delta месяцев.
+    shift_month('2025-01', -1) -> '2024-12'"""
+    return str(pd.Period(month, freq="M") + delta)
 
 def build_snapshot(usage: pd.DataFrame, clients: pd.DataFrame, snapshot: str) -> pd.DataFrame:
     """Собирает обучающую выборку для одной точки отсчёта.
@@ -34,7 +38,57 @@ def build_snapshot(usage: pd.DataFrame, clients: pd.DataFrame, snapshot: str) ->
     3. Определить таргет по окну прогноза
     4. Склеить признаки + таргет + метаданные клиента
     """
-    raise NotImplementedError("Реализуйте на неделе 2")
+    alive = clients[
+        (clients["connection_date"] <= snapshot)
+        & (clients["termination_date"].isna() | (clients["termination_date"] > snapshot))
+        ].copy()
+
+    active_ids = usage.loc[
+        (usage["month"] == snapshot) & (usage["revenue"] > 0),
+        "client_id",
+    ].unique()
+    alive = alive[alive["client_id"].isin(active_ids)]
+
+    obs_start = shift_month(snapshot, -(OBSERVATION_MONTHS - 1))  # например, для snapshot='2025-06' -> '2025-01'
+
+    obs = usage[
+        (usage["month"] >= obs_start)
+        & (usage["month"] <= snapshot)
+        & (usage["client_id"].isin(alive["client_id"]))
+        ].sort_values("month")
+
+    feats = obs.groupby("client_id").agg(
+        revenue_mean_6m=("revenue", "mean"),
+        revenue_last=("revenue", "last"),
+        traffic_mean_6m=("traffic_gb", "mean"),
+        tickets_sum_6m=("n_tickets", "sum"),
+        debt_max_6m=("debt", "max"),
+        n_sim_last=("n_sim", "last"),
+    ).reset_index()
+
+    pred_start = shift_month(snapshot, FORECAST_MONTHS - 1)  # следующий месяц после snapshot
+    pred_end = shift_month(snapshot, FORECAST_MONTHS)  # через 3 месяца
+
+    pred = usage[
+        (usage["month"] >= pred_start)
+        & (usage["month"] <= pred_end)
+        & (usage["client_id"].isin(alive["client_id"]))
+        ]
+    pred_rev = pred.groupby("client_id")["revenue"].sum()
+
+    alive["pred_revenue"] = alive["client_id"].map(pred_rev).fillna(0)
+
+    alive["target"] = (
+            (alive["termination_date"].notna() & (alive["termination_date"] <= pred_end))
+            | (alive["pred_revenue"] == 0)
+    ).astype(int)
+
+    df = alive[["client_id", "segment", "product", "region", "target"]].merge(
+        feats, on="client_id", how="left"
+    )
+
+    df["snapshot_date"] = snapshot
+    return df
 
 
 def make_features(obs: pd.DataFrame, obs_end) -> pd.DataFrame:
