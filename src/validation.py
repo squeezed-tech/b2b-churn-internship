@@ -4,9 +4,20 @@
 Отток — редкое событие, поэтому accuracy не подходит. Используем метрики
 ранжирования: ROC-AUC, PR-AUC, Precision@k, Lift@k.
 """
+import pandas as pd
 import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score
 
+
+def time_split(dataset: pd.DataFrame, train_snapshots: list, test_snapshots: list):
+    """Out-of-time разбиение: train — ранние снапшоты, test — поздние.
+
+    Никакого случайного перемешивания: модель проверяется на "будущем"
+    относительно обучения, как это будет в реальном бою.
+    """
+    train = dataset[dataset["snapshot_date"].isin(train_snapshots)].copy()
+    test = dataset[dataset["snapshot_date"].isin(test_snapshots)].copy()
+    return train, test
 
 def precision_at_k(y_true, y_score, k: float = 0.1) -> float:
     """Доля реально ушедших среди топ-k% клиентов по прогнозу риска."""
