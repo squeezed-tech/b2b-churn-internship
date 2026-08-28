@@ -10,3 +10,5 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 .DS_Store
+.idea/
+notebooks/catboost_info/
