@@ -11,8 +11,8 @@ leakage.
 import numpy as np
 import pandas as pd
 
-OBSERVATION_MONTHS = 6  # окно наблюдения: сколько месяцев до snapshot
-FORECAST_MONTHS = 3      # окно прогноза: сколько месяцев после snapshot
+OBSERVATION_MONTHS = 6
+FORECAST_MONTHS = 3
 
 def shift_month(month: str, delta: int) -> str:
     """Сдвинуть месяц 'YYYY-MM' на delta месяцев.
@@ -49,7 +49,7 @@ def build_snapshot(usage: pd.DataFrame, clients: pd.DataFrame, snapshot: str) ->
     ].unique()
     alive = alive[alive["client_id"].isin(active_ids)]
 
-    obs_start = shift_month(snapshot, -(OBSERVATION_MONTHS - 1))  # например, для snapshot='2025-06' -> '2025-01'
+    obs_start = shift_month(snapshot, -(OBSERVATION_MONTHS - 1))
 
     obs = usage[
         (usage["month"] >= obs_start)
@@ -57,17 +57,10 @@ def build_snapshot(usage: pd.DataFrame, clients: pd.DataFrame, snapshot: str) ->
         & (usage["client_id"].isin(alive["client_id"]))
         ].sort_values("month")
 
-    feats = obs.groupby("client_id").agg(
-        revenue_mean_6m=("revenue", "mean"),
-        revenue_last=("revenue", "last"),
-        traffic_mean_6m=("traffic_gb", "mean"),
-        tickets_sum_6m=("n_tickets", "sum"),
-        debt_max_6m=("debt", "max"),
-        n_sim_last=("n_sim", "last"),
-    ).reset_index()
+    feats = make_features(obs, snapshot)
 
-    pred_start = shift_month(snapshot, FORECAST_MONTHS - 1)  # следующий месяц после snapshot
-    pred_end = shift_month(snapshot, FORECAST_MONTHS)  # через 3 месяца
+    pred_start = shift_month(snapshot, 1)
+    pred_end = shift_month(snapshot, FORECAST_MONTHS)
 
     pred = usage[
         (usage["month"] >= pred_start)
@@ -83,7 +76,11 @@ def build_snapshot(usage: pd.DataFrame, clients: pd.DataFrame, snapshot: str) ->
             | (alive["pred_revenue"] == 0)
     ).astype(int)
 
-    df = alive[["client_id", "segment", "product", "region", "target"]].merge(
+    alive["tenure_months"] = alive["connection_date"].apply(
+        lambda d: (pd.Period(snapshot, freq="M") - pd.Period(d, freq="M")).n
+    )
+
+    df = alive[["client_id", "segment", "product", "region", "tenure_months", "target"]].merge(
         feats, on="client_id", how="left"
     )
 
@@ -109,7 +106,52 @@ def make_features(obs: pd.DataFrame, obs_end) -> pd.DataFrame:
     - объём отношений (число услуг, срок жизни)
     - сигналы боли (обращения в поддержку, задолженность)
     """
-    raise NotImplementedError("Реализуйте на неделе 3")
+
+    obs = obs.sort_values(["client_id", "month"]).copy()
+
+    features = obs.groupby("client_id").agg(
+
+        # Платежи
+        revenue_mean_6m=("revenue", "mean"),
+        revenue_min_6m=("revenue", "min"),
+        revenue_max_6m=("revenue", "max"),
+        revenue_last=("revenue", "last"),
+
+        # Использование
+        traffic_mean_6m=("traffic_gb", "mean"),
+        traffic_last=("traffic_gb", "last"),
+
+        # Обращения в поддержку
+        tickets_sum_6m=("n_tickets", "sum"),
+        tickets_mean_6m=("n_tickets", "mean"),
+
+        # Задолженность
+        debt_max_6m=("debt", "max"),
+        debt_mean_6m=("debt", "mean"),
+        debt_last=("debt", "last"),
+
+        # Объём услуг
+        n_sim_mean_6m=("n_sim", "mean"),
+        n_sim_last=("n_sim", "last"),
+
+    )
+
+    # Последняя выручка относительно среднего уровня клиента
+
+    features["revenue_last_to_mean"] = (features["revenue_last"] / features["revenue_mean_6m"].replace(0, np.nan))
+    features["revenue_last_to_mean"] = (features["revenue_last_to_mean"].fillna(0))
+
+    # Динамические признаки
+
+    revenue_trend = (obs.groupby("client_id")["revenue"].apply(trend_slope).rename("revenue_trend"))
+    revenue_volatility = (obs.groupby("client_id")["revenue"].std().fillna(0).rename("revenue_volatility"))
+    declining_months = (obs.groupby("client_id")["revenue"].apply(months_declining).rename("revenue_declining_months"))
+
+    features = features.join(revenue_trend)
+    features = features.join(revenue_volatility)
+    features = features.join(declining_months)
+    features = features.reset_index()
+    return features
 
 
 def trend_slope(s: pd.Series) -> float:
