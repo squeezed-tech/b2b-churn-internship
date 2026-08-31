@@ -12,3 +12,4 @@ data/processed/*
 .DS_Store
 .idea/
 .idea/
+notebooks/catboost_info/
