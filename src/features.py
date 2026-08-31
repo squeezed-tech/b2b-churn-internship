@@ -13,6 +13,8 @@ import pandas as pd
 
 OBSERVATION_MONTHS = 6
 FORECAST_MONTHS = 3
+GAP_MONTHS = 2
+MIN_OBS_MONTHS = 4
 
 def shift_month(month: str, delta: int) -> str:
     """Сдвинуть месяц 'YYYY-MM' на delta месяцев.
@@ -22,26 +24,15 @@ def shift_month(month: str, delta: int) -> str:
 def build_snapshot(usage: pd.DataFrame, clients: pd.DataFrame, snapshot: str) -> pd.DataFrame:
     """Собирает обучающую выборку для одной точки отсчёта.
 
-    Parameters
-    ----------
-    usage : помесячная таблица (client_id, month, revenue, ...)
-    clients : справочник клиентов (client_id, segment, product, ...)
-    snapshot : строка вида '2025-01' — точка отсчёта
-
-    Returns
-    -------
-    DataFrame с признаками, таргетом и метаданными (segment/product/snapshot_date)
-
-    TODO (неделя 2):
-    1. Отфильтровать клиентов, активных на конец окна наблюдения ("мёртвые души")
-    2. Посчитать признаки по окну наблюдения через make_features()
-    3. Определить таргет по окну прогноза
-    4. Склеить признаки + таргет + метаданные клиента
+    Наблюдение: OBSERVATION_MONTHS месяцев по месяц снапшота включительно -> признаки.
+    Зазор: GAP_MONTHS месяцев после снапшота -> не используются вообще.
+    Прогноз: FORECAST_MONTHS месяцев после зазора -> только таргет.
     """
+    # --- живые на момент снапшота ---
     alive = clients[
         (clients["connection_date"] <= snapshot)
         & (clients["termination_date"].isna() | (clients["termination_date"] > snapshot))
-        ].copy()
+    ].copy()
 
     active_ids = usage.loc[
         (usage["month"] == snapshot) & (usage["revenue"] > 0),
@@ -49,31 +40,39 @@ def build_snapshot(usage: pd.DataFrame, clients: pd.DataFrame, snapshot: str) ->
     ].unique()
     alive = alive[alive["client_id"].isin(active_ids)]
 
+    # --- окно наблюдения (только признаки) ---
     obs_start = shift_month(snapshot, -(OBSERVATION_MONTHS - 1))
-
     obs = usage[
         (usage["month"] >= obs_start)
         & (usage["month"] <= snapshot)
         & (usage["client_id"].isin(alive["client_id"]))
-        ].sort_values("month")
+    ].sort_values("month")
+
+    # Фильтр короткой истории: минимум MIN_OBS_MONTHS месяцев в окне,
+    # иначе "среднее за 6 месяцев" считается по 1-2 месяцам
+    obs_months = obs.groupby("client_id")["month"].nunique()
+    good_ids = obs_months[obs_months >= MIN_OBS_MONTHS].index
+    obs = obs[obs["client_id"].isin(good_ids)]
+    alive = alive[alive["client_id"].isin(good_ids)]
 
     feats = make_features(obs, snapshot)
 
-    pred_start = shift_month(snapshot, 1)
-    pred_end = shift_month(snapshot, FORECAST_MONTHS)
+    # --- окно прогноза (только таргет), через зазор ---
+    pred_start = shift_month(snapshot, GAP_MONTHS + 1)
+    pred_end = shift_month(snapshot, GAP_MONTHS + FORECAST_MONTHS)
 
     pred = usage[
         (usage["month"] >= pred_start)
         & (usage["month"] <= pred_end)
         & (usage["client_id"].isin(alive["client_id"]))
-        ]
+    ]
     pred_rev = pred.groupby("client_id")["revenue"].sum()
 
     alive["pred_revenue"] = alive["client_id"].map(pred_rev).fillna(0)
 
     alive["target"] = (
-            (alive["termination_date"].notna() & (alive["termination_date"] <= pred_end))
-            | (alive["pred_revenue"] == 0)
+        (alive["termination_date"].notna() & (alive["termination_date"] <= pred_end))
+        | (alive["pred_revenue"] == 0)
     ).astype(int)
 
     alive["tenure_months"] = alive["connection_date"].apply(
@@ -83,7 +82,6 @@ def build_snapshot(usage: pd.DataFrame, clients: pd.DataFrame, snapshot: str) ->
     df = alive[["client_id", "segment", "product", "region", "tenure_months", "target"]].merge(
         feats, on="client_id", how="left"
     )
-
     df["snapshot_date"] = snapshot
     return df
 

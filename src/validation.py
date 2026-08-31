@@ -9,15 +9,24 @@ import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score
 
 
-def time_split(dataset: pd.DataFrame, train_snapshots: list, test_snapshots: list):
-    """Out-of-time разбиение: train — ранние снапшоты, test — поздние.
+def time_split(dataset, train_snaps, val_snaps, test_snaps):
+    """Разбиение по времени (out-of-time), три среза.
 
-    Никакого случайного перемешивания: модель проверяется на "будущем"
-    относительно обучения, как это будет в реальном бою.
+    Parameters
+    ----------
+    dataset : датасет со столбцом snapshot_date
+    train_snaps : список снапшотов для train
+    val_snaps : список снапшотов для val (early stopping)
+    test_snaps : список снапшотов для test (финальная оценка)
+
+    Returns
+    -------
+    train, val, test — три датафрейма
     """
-    train = dataset[dataset["snapshot_date"].isin(train_snapshots)].copy()
-    test = dataset[dataset["snapshot_date"].isin(test_snapshots)].copy()
-    return train, test
+    train = dataset[dataset["snapshot_date"].isin(train_snaps)]
+    val = dataset[dataset["snapshot_date"].isin(val_snaps)]
+    test = dataset[dataset["snapshot_date"].isin(test_snaps)]
+    return train, val, test
 
 def precision_at_k(y_true, y_score, k: float = 0.1) -> float:
     """Доля реально ушедших среди топ-k% клиентов по прогнозу риска."""
